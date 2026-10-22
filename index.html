@@ -307,7 +307,7 @@ input.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
   display: grid;
   gap: 10px;
 }
-.item-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.item-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
 .seg-btn {
   min-height: 40px;
@@ -330,7 +330,7 @@ input.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 }
 .item-total strong { color: var(--fg); font-size: 15px; font-weight: 500; }
 .addrow { display: flex; gap: 10px; flex-wrap: wrap; }
-.addrow .btn { flex: 1 1 140px; }
+.addrow .btn { flex: 1 1 100px; }
 
 .issuebar {
   position: sticky;
@@ -485,6 +485,12 @@ input.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
   .item-nums .f:last-child { grid-column: 1 / -1; }
   .stats dd { font-size: 14px; }
 }
+@media (max-width: 360px) {
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
+  .item-top { flex-wrap: nowrap; gap: 4px; }
+  .seg-btn { padding: 0 8px; font-size: 13.5px; }
+  .icon-btn { width: 36px; }
+}
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
 </style>
 </head>
@@ -540,6 +546,7 @@ input.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
           <div class="addrow">
             <button type="button" class="btn" data-add="work">+ Práce</button>
             <button type="button" class="btn" data-add="material">+ Materiál</button>
+            <button type="button" class="btn" data-add="discount">+ Sleva</button>
           </div>
           <datalist id="units">
             <option value="hod"></option><option value="ks"></option><option value="m"></option><option value="m²"></option>
@@ -652,17 +659,45 @@ const Core = (() => {
     return Number(s);
   }
   const toCents = (n) => Math.round(n * 100 + (n >= 0 ? 1e-9 : -1e-9));
-  function lineCents(it) {
+  // Cena práce nebo materiálu: množství krát cena za jednotku.
+  function baseCents(it) {
     const q = parseNum(it.qty);
     const p = parseNum(it.price);
     if (!Number.isFinite(q) || !Number.isFinite(p)) return 0;
     return Math.round(q * toCents(p));
   }
-  function sumCents(items, type) {
+  function workCents(items) {
     let t = 0;
-    for (const it of items || []) if (!type || it.type === type) t += lineCents(it);
+    for (const it of items || []) if (it.type === 'work') t += baseCents(it);
     return t;
   }
+  // Sleva (type "discount") je záporná částka. Počítá se z práce celkem, materiál se do základu nebere.
+  // Procenta se berou na setiny, zaokrouhluje se na haléře nahoru od poloviny. Počítá se jen s celými čísly.
+  function discountCents(it, items) {
+    const pct = parseNum(it.percent);
+    if (!Number.isFinite(pct) || pct <= 0) return 0;
+    const work = workCents(items);
+    if (work <= 0) return 0;
+    return -Math.floor((work * Math.round(Math.min(pct, 100) * 100) + 5000) / 10000);
+  }
+  // Pro slevu je třeba předat celý seznam položek, protože se počítá z práce.
+  function lineCents(it, items) {
+    return it.type === 'discount' ? discountCents(it, items) : baseCents(it);
+  }
+  function sumCents(items, type) {
+    let t = 0;
+    for (const it of items || []) if (!type || it.type === type) t += lineCents(it, items);
+    return t;
+  }
+  // Má položka co zobrazit? Prázdné řádky ve formuláři se na faktuře vynechají.
+  function hasContent(it, items) {
+    if (it.desc) return true;
+    return it.type === 'discount' ? parseNum(it.percent) > 0 : lineCents(it, items) > 0;
+  }
+  const fmtPercent = (p) => {
+    const n = parseNum(p);
+    return Number.isFinite(n) ? String(Math.round(n * 100) / 100).replace('.', ',') + NB + '%' : '';
+  };
   function fmtMoney(cents) {
     const neg = cents < 0;
     const abs = Math.abs(Math.round(cents));
@@ -798,7 +833,7 @@ const Core = (() => {
   };
 
   return {
-    parseNum, toCents, lineCents, sumCents, fmtMoney, fmtQty, numStr, plural,
+    parseNum, toCents, lineCents, sumCents, workCents, hasContent, fmtPercent, fmtMoney, fmtQty, numStr, plural,
     todayIso, addDays, fmtDate, daysBetween, nextNumber, status,
     parseAccount, czIban, ibanValid, spayd, qrText, ascii, slug
   };
@@ -1194,8 +1229,10 @@ const PDFInvoice = (() => {
     const bold = makeFont(fonts.bold, 'F2');
     const s = inv.supplier || {};
     const c = inv.customer || {};
-    const items = (inv.items || []).filter((it) => it.desc || Core.lineCents(it) > 0);
+    const all = inv.items || [];
+    const items = all.filter((it) => Core.hasContent(it, all));
     const total = Core.sumCents(items);
+    const workBase = Core.workCents(items);
     const acc = Core.parseAccount(s.account);
     const qrText = Core.qrText(Object.assign({}, inv, { items }));
 
@@ -1319,12 +1356,18 @@ const PDFInvoice = (() => {
         tableHeader();
       }
       const top = y + PAD_Y;
+      const isDisc = it.type === 'discount';
       paragraph(it.desc || ' ', MARGIN.left + PAD_X, top, descW, descO);
-      text(it.type === 'material' ? 'Materiál' : 'Práce', MARGIN.left + PAD_X, top + descH + 1, { size: 7.5, color: COLOR.muted });
-      const p = Core.parseNum(it.price);
-      text(Core.fmtQty(it.qty) + (it.unit ? NB + it.unit : ''), xQtyR, top, { size: 9.5, align: 'right' });
-      text(Core.fmtMoney(Number.isFinite(p) ? Core.toCents(p) : 0), xPriceR, top, { size: 9.5, align: 'right' });
-      text(Core.fmtMoney(Core.lineCents(it)), xTotR, top, { size: 9.5, bold: true, align: 'right' });
+      const tag = isDisc ? 'Z práce celkem ' + Core.fmtMoney(workBase) : it.type === 'material' ? 'Materiál' : 'Práce';
+      text(tag, MARGIN.left + PAD_X, top + descH + 1, { size: 7.5, color: COLOR.muted });
+      if (isDisc) {
+        text(Core.fmtPercent(it.percent), xQtyR, top, { size: 9.5, align: 'right' });
+      } else {
+        const p = Core.parseNum(it.price);
+        text(Core.fmtQty(it.qty) + (it.unit ? NB + it.unit : ''), xQtyR, top, { size: 9.5, align: 'right' });
+        text(Core.fmtMoney(Number.isFinite(p) ? Core.toCents(p) : 0), xPriceR, top, { size: 9.5, align: 'right' });
+      }
+      text(Core.fmtMoney(Core.lineCents(it, items)), xTotR, top, { size: 9.5, bold: true, align: 'right' });
       y += rowH;
       if (idx < items.length - 1) hline(MARGIN.left, MARGIN.left + CW, y, 0.5, COLOR.line);
     });
@@ -1332,11 +1375,13 @@ const PDFInvoice = (() => {
     /* --- mezisoučty --- */
     const work = Core.sumCents(items, 'work');
     const mat = Core.sumCents(items, 'material');
-    if (work > 0 && mat > 0) {
-      const need = 8 + 2 * (lh(8.5) + 4) + 12 + 40;
+    const disc = Core.sumCents(items, 'discount');
+    const sumRows = [['Práce', work], ['Sleva', disc], ['Materiál', mat]].filter((r) => r[1] !== 0);
+    if (sumRows.length >= 2) {
+      const need = 8 + sumRows.length * (lh(8.5) + 4) + 12 + 40;
       if (y + need > bottom) newPage();
       y += 8;
-      for (const [label, val] of [['Práce', work], ['Materiál', mat]]) {
+      for (const [label, val] of sumRows) {
         text(label, MARGIN.left + CW - 210 + 4, y + 2, { size: 8.5, color: COLOR.muted });
         text(Core.fmtMoney(val), MARGIN.left + CW - 4, y + 2, { size: 8.5, color: COLOR.muted, align: 'right' });
         y += lh(8.5) + 4;
@@ -1537,7 +1582,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
    Očekává globální Core (core.js), QR (qr.js), PDFInvoice (pdf.js) a PDF_FONTS (fonts-pdf.js). */
 (() => {
   'use strict';
-  const APP_VERSION = '1.0';
+  const APP_VERSION = '1.1';
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1608,8 +1653,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
   /* ---------------------------------------------------------------
      Koncept faktury (pamatuje se, i když aplikaci zavřete)
   --------------------------------------------------------------- */
-  const defUnit = (t) => (t === 'work' ? 'hod' : 'ks');
-  const blankItem = (type) => ({ type, desc: '', qty: '1', unit: defUnit(type), price: type === 'work' ? String(S.settings.rate || '') : '' });
+  const defUnit = (t) => (t === 'work' ? 'hod' : t === 'material' ? 'ks' : '');
+  const blankItem = (type) => ({ type, desc: type === 'discount' ? 'Sleva' : '', qty: '1', unit: defUnit(type), price: type === 'work' ? String(S.settings.rate || '') : '', percent: '' });
   const blankCustomer = () => ({ name: '', street: '', city: '', ico: '', dic: '' });
   const newDraft = () => ({ customer: blankCustomer(), number: '', issued: Core.todayIso(), days: '', note: '', items: [blankItem('work')] });
 
@@ -1625,9 +1670,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
       base.days = String(d.days || '');
       base.note = String(d.note || '');
       const items = d.items.map((it) => ({
-        type: it.type === 'material' ? 'material' : 'work',
+        type: it.type === 'material' ? 'material' : it.type === 'discount' ? 'discount' : 'work',
         desc: String(it.desc || ''), qty: String(it.qty == null ? '' : it.qty),
-        unit: String(it.unit || ''), price: String(it.price == null ? '' : it.price)
+        unit: String(it.unit || ''), price: String(it.price == null ? '' : it.price),
+        percent: String(it.percent == null ? '' : it.percent)
       }));
       if (items.length) base.items = items;
       return base;
@@ -1662,6 +1708,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
     const s = S.settings;
     return { name: s.name.trim(), street: s.street.trim(), city: s.city.trim(), ico: s.ico.trim(), email: s.email.trim(), phone: s.phone.trim(), account: s.account.trim(), footer: s.footer.trim() };
   };
+  // Položka z formuláře (texty) na čísla. Sleva má jen popis a procenta.
+  const itemData = (it) => (it.type === 'discount'
+    ? { type: 'discount', desc: it.desc.trim() || 'Sleva', percent: Core.parseNum(it.percent) }
+    : { type: it.type, desc: it.desc.trim(), qty: Core.parseNum(it.qty), unit: it.unit.trim(), price: Core.parseNum(it.price) });
   function draftInvoice() {
     const d = S.draft;
     const number = effNumber();
@@ -1675,7 +1725,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
       due: Core.addDays(issued, effDays()),
       customer: { name: c.name.trim(), street: c.street.trim(), city: c.city.trim(), ico: c.ico.trim(), dic: c.dic.trim() },
       supplier: snapshotSupplier(),
-      items: d.items.map((it) => ({ type: it.type, desc: it.desc.trim(), qty: Core.parseNum(it.qty), unit: it.unit.trim(), price: Core.parseNum(it.price) })),
+      items: d.items.map(itemData),
       note: d.note.trim()
     };
   }
@@ -1692,22 +1742,24 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
   }
   function renderPaper(inv) {
     const s = inv.supplier, c = inv.customer;
-    const items = inv.items.filter((it) => it.desc || it.price > 0);
+    const items = inv.items.filter((it) => Core.hasContent(it, inv.items));
     const total = Core.sumCents(items);
     const acc = Core.parseAccount(s.account);
     const miss = (t) => '<span class="p-missing">' + esc(t) + '</span>';
     const lines = (arr) => arr.filter(Boolean).map((t) => '<div>' + esc(t) + '</div>').join('');
     const rows = items.length
       ? items.map((it) => {
-          const p = Number.isFinite(it.price) ? Core.toCents(it.price) : 0;
+          const meta = it.type === 'discount'
+            ? 'Sleva ' + esc(Core.fmtPercent(it.percent)) + ' z práce celkem ' + Core.fmtMoney(Core.workCents(items))
+            : (it.type === 'material' ? 'Materiál' : 'Práce') + ' · ' + esc(Core.fmtQty(it.qty)) + ' ' + esc(it.unit) + ' × ' + Core.fmtMoney(Number.isFinite(it.price) ? Core.toCents(it.price) : 0);
           return '<div class="p-row"><div class="p-desc"><div>' + (it.desc ? esc(it.desc) : miss('Bez popisu')) + '</div>' +
-            '<div class="p-meta">' + (it.type === 'material' ? 'Materiál' : 'Práce') + ' · ' + esc(Core.fmtQty(it.qty)) + ' ' + esc(it.unit) + ' × ' + Core.fmtMoney(p) + '</div></div>' +
-            '<div class="p-amt mono">' + Core.fmtMoney(Core.lineCents(it)) + '</div></div>';
+            '<div class="p-meta">' + meta + '</div></div>' +
+            '<div class="p-amt mono">' + Core.fmtMoney(Core.lineCents(it, items)) + '</div></div>';
         }).join('')
       : '<div class="p-empty">Přidejte práci nebo materiál.</div>';
-    const work = Core.sumCents(items, 'work'), mat = Core.sumCents(items, 'material');
-    const sub = work > 0 && mat > 0
-      ? '<div class="p-sub"><div><span>Práce</span><span class="mono">' + Core.fmtMoney(work) + '</span></div><div><span>Materiál</span><span class="mono">' + Core.fmtMoney(mat) + '</span></div></div>'
+    const sumRows = [['Práce', Core.sumCents(items, 'work')], ['Sleva', Core.sumCents(items, 'discount')], ['Materiál', Core.sumCents(items, 'material')]].filter((r) => r[1] !== 0);
+    const sub = sumRows.length >= 2
+      ? '<div class="p-sub">' + sumRows.map((r) => '<div><span>' + r[0] + '</span><span class="mono">' + Core.fmtMoney(r[1]) + '</span></div>').join('') + '</div>'
       : '';
     const qr = Core.qrText(Object.assign({}, inv, { items }));
     const payRows = [
@@ -1730,29 +1782,36 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
   }
 
   function itemHtml(it, i) {
-    const w = it.type === 'work';
-    return '<div class="item" data-i="' + i + '">' +
-      '<div class="item-top"><div class="seg" role="group" aria-label="Druh položky">' +
-        '<button type="button" class="seg-btn" data-act="type" data-v="work" aria-pressed="' + w + '">Práce</button>' +
-        '<button type="button" class="seg-btn" data-act="type" data-v="material" aria-pressed="' + !w + '">Materiál</button>' +
-      '</div><button type="button" class="icon-btn" data-act="remove" aria-label="Odebrat položku">×</button></div>' +
-      '<div class="f"><label for="it-' + i + '-desc">Popis</label><input id="it-' + i + '-desc" data-f="desc" type="text" value="' + esc(it.desc) + '" placeholder="' + (w ? 'Např. oprava rozvodu vody' : 'Např. měděné trubky 15 mm') + '"></div>' +
-      '<div class="item-nums">' +
-        '<div class="f"><label for="it-' + i + '-qty">Množství</label><input id="it-' + i + '-qty" class="num" data-f="qty" type="text" inputmode="decimal" value="' + esc(it.qty) + '"></div>' +
-        '<div class="f"><label for="it-' + i + '-unit">Jednotka</label><input id="it-' + i + '-unit" data-f="unit" type="text" list="units" value="' + esc(it.unit) + '"></div>' +
-        '<div class="f"><label for="it-' + i + '-price">Cena za jedn. (Kč)</label><input id="it-' + i + '-price" class="num" data-f="price" type="text" inputmode="decimal" value="' + esc(it.price) + '"></div>' +
-      '</div>' +
-      '<div class="item-total"><span>Položka celkem</span><strong class="mono" data-total>' + Core.fmtMoney(Core.lineCents(it)) + '</strong></div></div>';
+    const w = it.type === 'work', m = it.type === 'material', d = it.type === 'discount';
+    const seg = '<div class="item-top"><div class="seg" role="group" aria-label="Druh položky">' +
+      '<button type="button" class="seg-btn" data-act="type" data-v="work" aria-pressed="' + w + '">Práce</button>' +
+      '<button type="button" class="seg-btn" data-act="type" data-v="material" aria-pressed="' + m + '">Materiál</button>' +
+      '<button type="button" class="seg-btn" data-act="type" data-v="discount" aria-pressed="' + d + '">Sleva</button>' +
+      '</div><button type="button" class="icon-btn" data-act="remove" aria-label="Odebrat položku">×</button></div>';
+    const desc = '<div class="f"><label for="it-' + i + '-desc">Popis</label><input id="it-' + i + '-desc" data-f="desc" type="text" value="' + esc(it.desc) + '" placeholder="' + (w ? 'Např. oprava rozvodu vody' : m ? 'Např. měděné trubky 15 mm' : 'Sleva') + '"></div>';
+    const nums = d
+      ? '<div class="f"><label for="it-' + i + '-percent">Sleva v procentech (%)</label><input id="it-' + i + '-percent" class="num" data-f="percent" type="text" inputmode="decimal" placeholder="10" value="' + esc(it.percent) + '"></div>' +
+        '<p class="hint">Počítá se z celkové ceny práce. Materiál se nesleví.</p>'
+      : '<div class="item-nums">' +
+          '<div class="f"><label for="it-' + i + '-qty">Množství</label><input id="it-' + i + '-qty" class="num" data-f="qty" type="text" inputmode="decimal" value="' + esc(it.qty) + '"></div>' +
+          '<div class="f"><label for="it-' + i + '-unit">Jednotka</label><input id="it-' + i + '-unit" data-f="unit" type="text" list="units" value="' + esc(it.unit) + '"></div>' +
+          '<div class="f"><label for="it-' + i + '-price">Cena za jedn. (Kč)</label><input id="it-' + i + '-price" class="num" data-f="price" type="text" inputmode="decimal" value="' + esc(it.price) + '"></div>' +
+        '</div>';
+    return '<div class="item" data-i="' + i + '">' + seg + desc + nums +
+      '<div class="item-total"><span>' + (d ? 'Sleva celkem' : 'Položka celkem') + '</span><strong class="mono" data-total>' + Core.fmtMoney(Core.lineCents(it, S.draft.items)) + '</strong></div></div>';
   }
   const renderItems = () => { $('#items').innerHTML = S.draft.items.map(itemHtml).join(''); };
-  function updateItemTotal(row, i) {
-    const t = $('[data-total]', row);
-    if (t) t.textContent = Core.fmtMoney(Core.lineCents(S.draft.items[i]));
+  // Sleva závisí na práci, proto se po každé změně přepočítají všechny položky.
+  function updateItemTotals() {
+    $$('#items .item').forEach((row) => {
+      const t = $('[data-total]', row);
+      if (t) t.textContent = Core.fmtMoney(Core.lineCents(S.draft.items[Number(row.dataset.i)], S.draft.items));
+    });
   }
 
   function refreshDraftViews() {
     const inv = draftInvoice();
-    $('#totalOut').textContent = Core.fmtMoney(Core.sumCents(inv.items.filter((it) => it.desc || it.price > 0)));
+    $('#totalOut').textContent = Core.fmtMoney(Core.sumCents(inv.items.filter((it) => Core.hasContent(it, inv.items))));
     $('#dueHint').textContent = 'Splatnost: ' + Core.fmtDate(inv.due);
     $('#i-days').placeholder = String(parseInt(S.settings.days, 10) >= 0 ? parseInt(S.settings.days, 10) : 14);
     $('#i-number').placeholder = autoNumber();
@@ -1836,11 +1895,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
     const cards = list.map((inv) => {
       const st = Core.status(inv, today);
       const isOpen = S.openId === inv.id;
-      const work = Core.sumCents(inv.items, 'work'), mat = Core.sumCents(inv.items, 'material');
+      const work = Core.sumCents(inv.items, 'work'), mat = Core.sumCents(inv.items, 'material'), disc = Core.sumCents(inv.items, 'discount');
       const n = inv.items.length;
       const detail = isOpen
         ? '<div class="inv-body"><p class="inv-sum">' + n + ' ' + Core.plural(n, 'položka', 'položky', 'položek') +
-            (work ? ' · práce ' + money(work) : '') + (mat ? ' · materiál ' + money(mat) : '') +
+            (work ? ' · práce ' + money(work) : '') + (disc ? ' · sleva ' + money(disc) : '') + (mat ? ' · materiál ' + money(mat) : '') +
             (inv.paid && inv.paidAt ? ' · zaplaceno ' + esc(Core.fmtDate(inv.paidAt)) : '') + '</p>' +
           '<div class="inv-actions">' +
             '<button type="button" class="btn primary" data-act="pdf">' + (CAN_SHARE ? 'Odeslat nebo uložit PDF' : 'Stáhnout PDF') + '</button>' +
@@ -1984,7 +2043,14 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
     if (!/^\d{4}-\d{2}-\d{2}$/.test(x.issued || '') || !/^\d{4}-\d{2}-\d{2}$/.test(x.due || '')) return null;
     const items = [];
     for (const it of x.items) {
-      const qty = Core.parseNum(it && it.qty), price = Core.parseNum(it && it.price);
+      if (!it || typeof it !== 'object') return null;
+      if (it.type === 'discount') {
+        const percent = Core.parseNum(it.percent);
+        if (!(percent > 0 && percent <= 100)) return null;
+        items.push({ type: 'discount', desc: String(it.desc || 'Sleva'), percent });
+        continue;
+      }
+      const qty = Core.parseNum(it.qty), price = Core.parseNum(it.price);
       if (!Number.isFinite(qty) || !Number.isFinite(price)) return null;
       items.push({ type: it.type === 'material' ? 'material' : 'work', desc: String(it.desc || ''), qty, unit: String(it.unit || ''), price });
     }
@@ -2055,20 +2121,32 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
     if (!inv.customer.name) return { msg: 'Doplňte odběratele.', focus: '#c-name' };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d.issued)) return { msg: 'Zadejte datum vystavení.', focus: '#i-issued' };
     if (S.invoices.some((i) => i.number === inv.number)) return { msg: 'Faktura s číslem ' + inv.number + ' už existuje. Změňte číslo.', focus: '#i-number' };
-    const rows = d.items.map((it, i) => ({ it, i })).filter((r) => r.it.desc.trim() || r.it.price.trim());
+    const rows = d.items.map((it, i) => ({ it, i })).filter((r) => r.it.type === 'discount' || r.it.desc.trim() || r.it.price.trim());
     if (!rows.length) return { msg: 'Přidejte aspoň jednu položku.', focus: '#it-0-desc' };
+    let pctSum = 0, hasWork = false, firstDisc = null;
     for (const r of rows) {
+      if (r.it.type === 'discount') {
+        const sel = '#it-' + r.i + '-percent';
+        if (firstDisc === null) firstDisc = sel;
+        const pct = Core.parseNum(r.it.percent);
+        if (!(pct > 0 && pct <= 100)) return { msg: 'Zadejte slevu v procentech, od 0,01 do 100.', focus: sel };
+        pctSum += pct;
+        continue;
+      }
       if (!r.it.desc.trim()) return { msg: 'Doplňte popis položky.', focus: '#it-' + r.i + '-desc' };
       if (!(Core.parseNum(r.it.qty) > 0)) return { msg: 'Zadejte množství větší než nula.', focus: '#it-' + r.i + '-qty' };
       if (!(Core.parseNum(r.it.price) > 0)) return { msg: 'Zadejte cenu položky.', focus: '#it-' + r.i + '-price' };
+      if (r.it.type === 'work') hasWork = true;
     }
+    if (firstDisc !== null && !hasWork) return { msg: 'Sleva se počítá z práce. Přidejte položku práce s cenou, nebo slevu odeberte.', focus: firstDisc };
+    if (pctSum > 100) return { msg: 'Slevy dohromady nesmí překročit 100 %.', focus: firstDisc };
     return null;
   }
   function buildInvoice() {
     const inv = draftInvoice();
     inv.items = S.draft.items
-      .filter((it) => it.desc.trim() || it.price.trim())
-      .map((it) => ({ type: it.type, desc: it.desc.trim(), qty: Core.parseNum(it.qty), unit: it.unit.trim(), price: Core.parseNum(it.price) }));
+      .filter((it) => it.type === 'discount' || it.desc.trim() || it.price.trim())
+      .map(itemData);
     inv.id = newId();
     inv.total = Core.sumCents(inv.items);
     inv.paid = false;
@@ -2144,10 +2222,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
   function setItemType(i, type) {
     const it = S.draft.items[i];
     if (!it || it.type === type) return;
-    if (!it.unit || it.unit === defUnit(it.type)) it.unit = defUnit(type);
-    const rate = String(S.settings.rate || '');
-    if (type === 'work' && !it.price && rate) it.price = rate;
-    if (type === 'material' && it.price && it.price === rate) it.price = '';
+    if (type === 'discount') {
+      if (!it.desc.trim()) it.desc = 'Sleva';
+    } else {
+      if (it.type === 'discount' && it.desc.trim() === 'Sleva') it.desc = '';
+      if (!it.unit || it.unit === defUnit(it.type)) it.unit = defUnit(type);
+      const rate = String(S.settings.rate || '');
+      if (type === 'work' && !it.price && rate) it.price = rate;
+      if (type === 'material' && it.price && it.price === rate) it.price = '';
+    }
     it.type = type;
     renderItems();
     const b = $('#items .item[data-i="' + i + '"] [data-v="' + type + '"]');
@@ -2157,7 +2240,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
   function reuse(inv) {
     S.draft = newDraft();
     S.draft.customer = Object.assign(blankCustomer(), inv.customer);
-    S.draft.items = inv.items.map((it) => ({ type: it.type, desc: it.desc, qty: Core.numStr(it.qty), unit: it.unit, price: Core.numStr(it.price) }));
+    S.draft.items = inv.items.map((it) => (it.type === 'discount'
+      ? { type: 'discount', desc: it.desc, qty: '1', unit: '', price: '', percent: Core.numStr(it.percent) }
+      : { type: it.type, desc: it.desc, qty: Core.numStr(it.qty), unit: it.unit, price: Core.numStr(it.price), percent: '' }));
     S.draft.note = inv.note || '';
     fillFormFromDraft();
     persistDraft(false);
@@ -2187,7 +2272,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PDFInvoice
         const row = t.closest('.item');
         const i = Number(row.dataset.i);
         S.draft.items[i][t.dataset.f] = t.value;
-        updateItemTotal(row, i);
+        updateItemTotals();
       } else return;
       onDraftChange();
     });

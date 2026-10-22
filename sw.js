@@ -1,6 +1,6 @@
 /* Service worker Fakturky: po prvním načtení běží aplikace bez internetu.
    Soubory se berou z paměti telefonu a na pozadí se obnovují, takže nová verze se objeví při dalším otevření. */
-const CACHE = 'fakturka-313816d984';
+const CACHE = 'fakturka-db6ad39071';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (event) => {
